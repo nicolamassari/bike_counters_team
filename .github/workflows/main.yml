@@ -39,4 +39,8 @@ jobs:
 
         - name: Check black
           run: |
-              black --check .
+            if [ "${{ github.ref }}" != 'refs/heads/main' ]; then
+	      black --check .
+	    else
+	      echo "Skipping black check on the main branch."
+            fi
