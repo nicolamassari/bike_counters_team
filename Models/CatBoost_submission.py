@@ -1,23 +1,19 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
-
-
-# Preprocessing
+# Preprocessing libs
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import FunctionTransformer
 
-# Modelling
+# Modelling libs
 from sklearn.pipeline import Pipeline
-from catboost import CatBoostRegressor, Pool
+from catboost import CatBoostRegressor
 
-path = Path("mdsb-2023")
+path = Path.cwd().parent / "mdsb-2023"
 
-
-# In[9]:
+# ### Functions definition
 
 
 def train_test_split_temporal(X, y, delta_threshold="60 days"):
@@ -28,9 +24,6 @@ def train_test_split_temporal(X, y, delta_threshold="60 days"):
     y_train, y_valid = y[mask], y[~mask]
 
     return X_train, y_train, X_valid, y_valid
-
-
-# In[2]:
 
 
 def add_lags(X, cols_to_lag=["t", "u", "vv", "nnuage4"], lag_list=[2, -24, -2]):
@@ -71,9 +64,7 @@ def add_moving_average(
     return X
 
 
-# ### Define pipeline functions
-
-# In[3]:
+# ### Pipeline functions definition
 
 
 def _encode_dates(X, col_name="date"):
@@ -83,12 +74,18 @@ def _encode_dates(X, col_name="date"):
     X["weekday"] = X[col_name].dt.weekday
     X["hour"] = X[col_name].dt.hour
 
+    X["month_sin"] = np.sin(2 * np.pi * X["date"].dt.month / 12)
+    X["month_cos"] = np.cos(2 * np.pi * X["date"].dt.month / 12)
+
+    X["day_sin"] = np.sin(2 * np.pi * X["date"].dt.day / X["date"].dt.days_in_month)
+    X["day_cos"] = np.cos(2 * np.pi * X["date"].dt.day / X["date"].dt.days_in_month)
+
+    X["hour_sin"] = np.sin(2 * np.pi * X["date"].dt.hour / 24)
+    X["hour_cos"] = np.cos(2 * np.pi * X["date"].dt.hour / 24)
+
     X[["month", "weekday", "hour"]] = X[["month", "weekday", "hour"]].astype("category")
 
     return X.drop(columns=[col_name])
-
-
-# In[4]:
 
 
 def _encode_covid(X, col_name="date"):
@@ -105,9 +102,6 @@ def _encode_covid(X, col_name="date"):
     X.loc[lockdown_1 | lockdown_2 | lockdown_3, "Covid"] = 1
 
     return X
-
-
-# In[5]:
 
 
 def _merge_external_data(X, include_lags=True, include_ma=True):
@@ -213,9 +207,6 @@ def _merge_external_data(X, include_lags=True, include_ma=True):
     return X
 
 
-# In[6]:
-
-
 def _gas_price_encoder(X):
     X = X.copy()
     X["gas_price"] = 1
@@ -266,19 +257,45 @@ def _gas_price_encoder(X):
     return X
 
 
+def get_pipeline():
+    data_merger = FunctionTransformer(_merge_external_data, validate=False)
+    covid_encoder = FunctionTransformer(_encode_covid, validate=False)
+    gas_encoder = FunctionTransformer(_gas_price_encoder, validate=False)
+    date_encoder = FunctionTransformer(_encode_dates, validate=False)
+
+    best_params = {
+        "learning_rate": 0.16,
+        "max_depth": 8,
+        "n_estimators": 136,
+        "subsample": 0.8,
+        "od_pval": 1e-5,
+    }
+
+    regressor = CatBoostRegressor(**best_params)
+
+    pipe = Pipeline(
+        [
+            ("merge external", data_merger),
+            ("gas prices encoder", gas_encoder),
+            ("covid encoder", covid_encoder),
+            ("date encoder", date_encoder),
+            ("regressor", regressor),
+        ]
+    )
+
+    return pipe
+
+
+def full_encode(X):
+    return _encode_dates(_encode_covid(_gas_price_encoder(_merge_external_data(X))))
+
+
 # ## Import main dataset
-
-# In[7]:
-
 
 data = pd.read_parquet(path / "train.parquet")
 test = pd.read_parquet(path / "final_test.parquet")
 
 targets = ["bike_count", "log_bike_count"]
-
-
-# In[8]:
-
 
 data.drop(
     columns=[
@@ -307,70 +324,19 @@ test.drop(
 
 # ## Model
 
-# In[10]:
-
-
 X, y = data.drop(columns=targets), data["log_bike_count"]
 
-target_name = "log_bike_count"
-
-data_merger = FunctionTransformer(_merge_external_data, validate=False)
-covid_encoder = FunctionTransformer(_encode_covid, validate=False)
-gas_encoder = FunctionTransformer(_gas_price_encoder, validate=False)
-date_encoder = FunctionTransformer(_encode_dates, validate=False)
-
-date_cols = _encode_dates(X[["date"]]).columns.tolist()
+date_cols = (
+    _encode_dates(X[["date"]]).select_dtypes(include="category").columns.tolist()
+)
 categorical_cols = ["counter_name"] + date_cols
 
+pipe = get_pipeline()
 
-# In[11]:
-
-
-# {'learning_rate': 0.16263414906434522, 'n_estimators': 633}
-best_params = {
-    "learning_rate": 0.16,
-    "max_depth": 8,
-    "n_estimators": 630,
-    "subsample": 0.8,
-    "od_pval": 1e-5,
-}
-
-regressor = CatBoostRegressor(**best_params)
-
-pipe = Pipeline(
-    [
-        ("merge external", data_merger),
-        ("gas prices encoder", gas_encoder),
-        ("covid encoder", covid_encoder),
-        ("date encoder", date_encoder),
-        ("regressor", regressor),
-    ]
-)
-
-# # Submission
-
-# In[ ]:
-
-
-val_pool = Pool(
-    _encode_dates(_encode_covid(_gas_price_encoder(_merge_external_data(X)))),
-    label=y,
-    cat_features=categorical_cols,
-)
-pipe.fit(
-    X,
-    y,
-    regressor__cat_features=categorical_cols,
-    regressor__early_stopping_rounds=70,
-    regressor__eval_set=val_pool,
-)
+pipe.fit(X, y, regressor__cat_features=categorical_cols)
 
 prediction = pipe.predict(test)
 prediction[prediction < 0] = 0
-
-
-# In[ ]:
-
 
 submission = pd.DataFrame({"log_bike_count": prediction})
 
