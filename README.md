@@ -1,5 +1,7 @@
 # Repository for Kaggle challenge team Nicola - Giacomo
 
+Nicola Massari, Giacomo Lustri
+
 # Starting kit on the bike counters dataset
 
 Read the instruction from the [Kaggle challenge](https://www.kaggle.com/competitions/mdsb-2023/overview).
